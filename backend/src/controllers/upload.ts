@@ -8,17 +8,25 @@ export const uploadFile = async (
     next: NextFunction
 ) => {
     if (!req.file) {
-        return next(new BadRequestError('Файл не загружен'))
+        return next(new BadRequestError('Файл не загружен или имеет неверный формат'))
     }
+    if (req.file.size < 2048) {
+        return next(new BadRequestError('Файл слишком маленький'))
+    }
+    if (req.file.size > 5 * 1024 * 1024) {
+        return next(new BadRequestError('Файл слишком большой. Максимальный размер: 5MB'))
+    }
+    
     try {
-        const fileName = process.env.UPLOAD_PATH
+        const filePath = process.env.UPLOAD_PATH
             ? `/${process.env.UPLOAD_PATH}/${req.file.filename}`
             : `/${req.file?.filename}`
+            
         return res.status(constants.HTTP_STATUS_CREATED).send({
-            fileName,
+            fileName: filePath,
             originalName: req.file?.originalname,
         })
-    } catch (error) {
+    } catch (error: unknown) {
         return next(error)
     }
 }

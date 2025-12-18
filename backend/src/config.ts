@@ -15,10 +15,11 @@ export const REFRESH_TOKEN = {
         name: 'refreshToken',
         options: {
             httpOnly: true,
-            sameSite: 'lax',
-            secure: false,
+            sameSite: 'strict',
+            secure: process.env.NODE_ENV === 'production',
             maxAge: ms(process.env.AUTH_REFRESH_TOKEN_EXPIRY || '7d'),
             path: '/',
         } as CookieOptions,
     },
 }
+export const { ORIGIN_ALLOW = 'http://localhost:5173' } = process.env

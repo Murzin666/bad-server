@@ -3,22 +3,24 @@ import fs from 'fs'
 import path from 'path'
 
 export default function serveStatic(baseDir: string) {
-    return (req: Request, res: Response, next: NextFunction) => {
-        // Определяем полный путь к запрашиваемому файлу
-        const filePath = path.join(baseDir, req.path)
+  return (req: Request, res: Response, next: NextFunction) => {
+    const requestedPath = path.normalize(req.path)
 
-        // Проверяем, существует ли файл
-        fs.access(filePath, fs.constants.F_OK, (accessErr) => {
-            if (accessErr) {
-                // Файл не существует отдаем дальше мидлварам
-                return next()
-            }
-            // Файл существует, отправляем его клиенту
-            return res.sendFile(filePath, (sendErr) => {
-                if (sendErr) {
-                    next(sendErr)
-                }
-            })
-        })
+    const filePath = path.join(baseDir, requestedPath)
+
+    if (!filePath.startsWith(baseDir)) {
+      return res.status(403).send('Forbidden')
     }
+
+    fs.access(filePath, fs.constants.F_OK, (err) => {
+      if (err) {
+        return next()
+      }
+      return res.sendFile(filePath, (sendErr) => {
+        if (sendErr) {
+          next(sendErr)
+        }
+      })
+    })
+  }
 }
