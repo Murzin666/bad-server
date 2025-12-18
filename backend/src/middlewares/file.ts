@@ -201,10 +201,14 @@ export const handleMulterError = (err: any, req: any, res: any, next: any) => {
 
 const upload = multer({
     storage,
-    fileFilter,
     limits: {
         fileSize: 5 * 1024 * 1024,
-        files: 10,
+    },
+    fileFilter: (req, file, cb) => {
+        if (file.size < 2048) {
+            return cb(new Error('Файл слишком маленький'))
+        }
+        cb(null, true)
     }
 })
 

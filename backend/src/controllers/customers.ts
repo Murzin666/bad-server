@@ -35,7 +35,7 @@ export const getCustomers = async (
         const pageNum = Math.max(1, parseInt(page, 10) || 1)
 
         const requestedLimit = parseInt(limit, 10) || 10
-        const limitNum = Math.min(requestedLimit, 100)
+        const limitNum = Math.min(requestedLimit, 10)
 
         const filters: FilterQuery<Partial<IUser>> = {}
 
