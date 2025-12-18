@@ -16,6 +16,11 @@ export const getOrders = async (
     next: NextFunction
 ) => {
     try {
+
+        if (res.locals.user?.role !== 'admin') {
+            return res.status(403).json({ error: 'Доступ запрещен' });
+        }
+
         const {
             page = '1',
             limit = '10',
@@ -303,6 +308,14 @@ export const createOrder = async (
         const userId = res.locals.user._id
         const { address, payment, phone, total, email, items, comment } =
             req.body
+
+            if (phone && phone.length > 20) { // Можно поставить 20 или 30 как разумный лимит
+            return next(new BadRequestError('Телефон слишком длинный. Максимальная длина: 20 символов'))
+        }
+
+        if (phone && !/^[\d\s\-\+\(\)]{10,20}$/.test(phone)) {
+            return next(new BadRequestError('Неверный формат телефона'))
+        }
 
         const productIds = (items as string[]).map(
             (id: string) => new Types.ObjectId(id)
