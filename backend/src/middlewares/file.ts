@@ -148,27 +148,40 @@ export const validateFileMetadata = async (file: Express.Multer.File): Promise<v
         } else if (file.path && fs.existsSync(file.path)) {
             bufferToCheck = fs.readFileSync(file.path);
         } else {
-            const fileName = file.originalname.toLowerCase();
-            const allowedExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff'];
-            const hasValidExtension = allowedExtensions.some(ext => fileName.endsWith(ext));
-            
-            if (!hasValidExtension) {
-                throw new FileUploadError(
-                    'Недопустимое расширение файла', 
-                    'INVALID_EXTENSION'
-                );
-            }
-            return;
+            throw new FileUploadError(
+                'Не удалось прочитать файл для проверки', 
+                'FILE_READ_ERROR'
+            );
         }
         
-        if (bufferToCheck && bufferToCheck.length > 0) {
-            const isPNG = bufferToCheck.length >= 8 && 
-                bufferToCheck[0] === 0x89 && bufferToCheck[1] === 0x50 && 
-                bufferToCheck[2] === 0x4E && bufferToCheck[3] === 0x47;
+        if (bufferToCheck.length > 100) {
+            let allZeros = true;
             
-            const isJPEG = bufferToCheck.length >= 3 && 
-                bufferToCheck[0] === 0xFF && bufferToCheck[1] === 0xD8 && bufferToCheck[2] === 0xFF;
-
+            for (let i = 0; i < Math.min(100, bufferToCheck.length); i++) {
+                if (bufferToCheck[i] !== 0) {
+                    allZeros = false;
+                    break;
+                }
+            }
+            
+            if (allZeros) {
+                throw new FileUploadError(
+                    'Файл содержит некорректные данные', 
+                    'INVALID_IMAGE_DATA'
+                );
+            }
+        }
+        
+        if (bufferToCheck.length >= 8) {
+            const isPNG = bufferToCheck[0] === 0x89 && 
+                         bufferToCheck[1] === 0x50 && 
+                         bufferToCheck[2] === 0x4E && 
+                         bufferToCheck[3] === 0x47;
+            
+            const isJPEG = bufferToCheck[0] === 0xFF && 
+                          bufferToCheck[1] === 0xD8 && 
+                          bufferToCheck[2] === 0xFF;
+            
             const isGIF = bufferToCheck.length >= 6 &&
                 bufferToCheck[0] === 0x47 && bufferToCheck[1] === 0x49 && bufferToCheck[2] === 0x46 &&
                 bufferToCheck[3] === 0x38 && (bufferToCheck[4] === 0x37 || bufferToCheck[4] === 0x39);
@@ -180,18 +193,17 @@ export const validateFileMetadata = async (file: Express.Multer.File): Promise<v
                 bufferToCheck[10] === 0x42 && bufferToCheck[11] === 0x50;
             
             if (!isPNG && !isJPEG && !isGIF && !isWebP) {
-                const fileName = file.originalname.toLowerCase();
-                if (fileName.endsWith('.png') || fileName.endsWith('.jpg') || 
-                    fileName.endsWith('.jpeg') || fileName.endsWith('.gif')) {
-                    console.warn(`Файл ${fileName} не прошел проверку магических чисел, но пропускаем для теста`);
-                    return;
-                }
-                
                 throw new FileUploadError(
-                    'Файл не является изображением (PNG, JPEG, GIF, WebP)', 
+                    'Файл не является валидным изображением (PNG, JPEG, GIF, WebP)', 
                     'NOT_AN_IMAGE'
                 );
             }
+            
+        } else {
+            throw new FileUploadError(
+                'Файл слишком маленький для изображения', 
+                'FILE_TOO_SMALL_FOR_IMAGE'
+            );
         }
         
     } catch (error) {
