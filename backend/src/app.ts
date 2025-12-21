@@ -15,7 +15,7 @@ import mongoSanitize from 'express-mongo-sanitize'
 
 const { PORT = 3000 } = process.env
 const app = express()
-
+app.set('trust proxy', 1)
 app.set('query parser', 'simple')
 
 const limiter = rateLimit({

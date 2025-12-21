@@ -1,8 +1,9 @@
-import { Request } from 'express'
+import { Request, Response } from 'express'
 import multer, { FileFilterCallback, MulterError } from 'multer'
 import { join, extname, resolve } from 'path'
 import crypto from 'crypto'
 import fs from 'fs'
+import { fileTypeFromBuffer } from 'file-type'
 
 type DestinationCallback = (error: Error | null, destination: string) => void
 type FileNameCallback = (error: Error | null, filename: string) => void
@@ -29,24 +30,9 @@ const ensureDirectoryExists = (dirPath: string): void => {
 const generateSafeFilename = (originalName: string): string => {
     const randomBytes = crypto.randomBytes(16).toString('hex')
     const timestamp = Date.now()
-    
     const extension = extname(originalName).toLowerCase()
     
-    if (extension) {
-        return `${timestamp}-${randomBytes}${extension}`
-    }
-    
-    if (originalName.includes('.')) {
-        const parts = originalName.split('.')
-        if (parts.length > 1) {
-            const lastPart = parts[parts.length - 1].toLowerCase()
-            if (lastPart.length <= 5 && /^[a-z0-9]+$/.test(lastPart)) {
-                return `${timestamp}-${randomBytes}.${lastPart}`
-            }
-        }
-    }
-    
-    return `${timestamp}-${randomBytes}`
+    return `${timestamp}-${randomBytes}${extension || '.bin'}`
 }
 
 class FileUploadError extends Error {
@@ -146,32 +132,88 @@ const fileFilter = (
     }
 }
 
-export const handleMulterError = (err: any, req: any, res: any, next: any) => {
+export const validateFileMetadata = async (file: Express.Multer.File): Promise<void> => {
+    try {
+        if (file.size < 2048) {
+            throw new FileUploadError(
+                'Файл слишком маленький. Минимальный размер: 2KB',
+                'FILE_TOO_SMALL'
+            );
+        }
+
+        if (file.size > 10 * 1024 * 1024) {
+            throw new FileUploadError(
+                'Файл слишком большой. Максимальный размер: 10MB',
+                'FILE_TOO_LARGE'
+            );
+        }
+
+        const buffer = file.buffer;
+        const uint8Array = new Uint8Array(
+            buffer.buffer,
+            buffer.byteOffset,
+            buffer.byteLength
+        );
+
+        const type = await fileTypeFromBuffer(uint8Array);
+        if (!type) {
+            throw new FileUploadError(
+                'Не удалось определить тип файла',
+                'UNKNOWN_FILE_TYPE'
+            );
+        }
+
+        const allowedImageTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff'];
+        if (!allowedImageTypes.includes(type.mime)) {
+            throw new FileUploadError(
+                'Файл не является изображением',
+                'NOT_AN_IMAGE'
+            );
+        }
+
+        const fileExt = extname(file.originalname).toLowerCase();
+        
+        const mimeToExt: Record<string, string[]> = {
+            'image/png': ['.png'],
+            'image/jpeg': ['.jpg', '.jpeg', '.jpe', '.jfif'],
+            'image/gif': ['.gif'],
+            'image/webp': ['.webp'],
+            'image/bmp': ['.bmp', '.dib'],
+            'image/tiff': ['.tiff', '.tif']
+        };
+
+        const allowedExtensions = mimeToExt[type.mime] || [];
+        if (!allowedExtensions.some(ext => fileExt === ext)) {
+            throw new FileUploadError(
+                `Несоответствие типа файла (${type.mime}) и расширения (${fileExt})`,
+                'MISMATCHED_EXTENSION'
+            );
+        }
+
+    } catch (error) {
+        if (error instanceof FileUploadError) {
+            throw error;
+        }
+        throw new FileUploadError(
+            'Ошибка при проверке метаданных файла',
+            'METADATA_VALIDATION_ERROR'
+        );
+    }
+};
+
+export const handleMulterError = (err: any, req: any, res: Response, next: any) => {
     if (err instanceof MulterError) {
-        // Обработка ошибок Multer
         let message = 'Ошибка загрузки файла'
         
         switch (err.code) {
             case 'LIMIT_FILE_SIZE':
-                message = 'Файл слишком большой. Максимальный размер: 5 МБ'
+                message = 'Файл слишком большой. Максимальный размер: 10 МБ'
                 break
             case 'LIMIT_FILE_COUNT':
-                message = 'Слишком много файлов. Максимальное количество: 10'
+                message = 'Слишком много файлов. Максимальное количество: 1'
                 break
             case 'LIMIT_UNEXPECTED_FILE':
                 message = 'Недопустимое поле для загрузки файла'
-                break
-            case 'LIMIT_PART_COUNT':
-                message = 'Слишком много частей в форме'
-                break
-            case 'LIMIT_FIELD_KEY':
-                message = 'Слишком длинное имя поля'
-                break
-            case 'LIMIT_FIELD_VALUE':
-                message = 'Слишком длинное значение поля'
-                break
-            case 'LIMIT_FIELD_COUNT':
-                message = 'Слишком много полей'
                 break
         }
         
@@ -182,6 +224,7 @@ export const handleMulterError = (err: any, req: any, res: any, next: any) => {
             field: err.field
         })
     } else if (err instanceof FileUploadError) {
+        // ИСПРАВЛЕНО
         return res.status(400).json({
             error: 'FileUploadError',
             message: err.message,
@@ -190,6 +233,7 @@ export const handleMulterError = (err: any, req: any, res: any, next: any) => {
         })
     } else if (err) {
         console.error('File upload error:', err)
+        // ИСПРАВЛЕНО
         return res.status(500).json({
             error: 'ServerError',
             message: 'Произошла ошибка при загрузке файла'
@@ -203,17 +247,35 @@ const upload = multer({
     storage,
     limits: {
         fileSize: 10 * 1024 * 1024,
+        files: 1,
     },
-    fileFilter: (req, file, cb) => {
-        if (file.size < 2048) {
-            return cb(new Error('Файл слишком маленький'))
-        }
-        cb(null, true)
-    }
+    fileFilter
 })
+
+export const fileMetadataMiddleware = async (req: Request, res: Response, next: Function) => {
+    try {
+        if (!req.file) {
+            return next();
+        }
+
+        await validateFileMetadata(req.file);
+        next();
+    } catch (error) {
+        if (error instanceof FileUploadError) {
+            // ИСПРАВЛЕНО
+            return res.status(400).json({
+                error: error.name,
+                message: error.message,
+                code: error.code
+            });
+        }
+        next(error);
+    }
+};
 
 export const uploadSingle = (fieldName: string) => [
     upload.single(fieldName),
+    fileMetadataMiddleware,
     handleMulterError
 ]
 
