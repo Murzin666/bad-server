@@ -13,10 +13,7 @@ export const uploadFile = async (
     if (req.file.size < 2048) {
         return next(new BadRequestError('Файл слишком маленький'))
     }
-    if (req.file.size > 5 * 1024 * 1024) {
-        return next(new BadRequestError('Файл слишком большой. Максимальный размер: 5MB'))
-    }
-    
+       
     try {
         const filePath = process.env.UPLOAD_PATH
             ? `/${process.env.UPLOAD_PATH}/${req.file.filename}`

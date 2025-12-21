@@ -1,8 +1,9 @@
 import { Joi, celebrate } from 'celebrate'
 import { Types } from 'mongoose'
 
-// eslint-disable-next-line no-useless-escape
-export const phoneRegExp = /^(\+\d+)?(?:\s|-?|\(?\d+\)?)+$/
+// Безопасное регулярное выражение для телефона (защита от ReDoS)
+// Простая проверка без сложных backtracking паттернов
+export const phoneRegExp = /^[\d\s\-\(\)\+]{10,20}$/
 
 export enum PaymentType {
     Card = 'card',
@@ -21,8 +22,13 @@ export const validateOrderBody = celebrate({
                     return helpers.message({ custom: 'Невалидный id' })
                 })
             )
+            .min(1)
+            .max(20) // Ограничение количества товаров
+            .required()
             .messages({
                 'array.empty': 'Не указаны товары',
+                'array.min': 'Корзина не может быть пустой',
+                'array.max': 'Слишком много товаров в заказе',
             }),
         payment: Joi.string()
             .valid(...Object.values(PaymentType))
@@ -32,19 +38,42 @@ export const validateOrderBody = celebrate({
                     'Указано не валидное значение для способа оплаты, возможные значения - "card", "online"',
                 'string.empty': 'Не указан способ оплаты',
             }),
-        email: Joi.string().email().required().messages({
-            'string.empty': 'Не указан email',
-        }),
-        phone: Joi.string().required().pattern(phoneRegExp).max(20).messages({
-            'string.empty': 'Не указан телефон',
-        }),
-        address: Joi.string().required().messages({
-            'string.empty': 'Не указан адрес',
-        }),
-        total: Joi.number().required().messages({
-            'string.empty': 'Не указана сумма заказа',
-        }),
-        comment: Joi.string().optional().allow(''),
+        email: Joi.string()
+            .email()
+            .max(100) // Ограничение длины email
+            .required()
+            .messages({
+                'string.empty': 'Не указан email',
+                'string.max': 'Email слишком длинный',
+                'string.email': 'Неверный формат email',
+            }),
+        phone: Joi.string()
+            .required()
+            .pattern(phoneRegExp)
+            .max(20)
+            .messages({
+                'string.empty': 'Не указан телефон',
+                'string.pattern.base': 'Неверный формат телефона',
+                'string.max': 'Телефон слишком длинный',
+            }),
+        address: Joi.string()
+            .required()
+            .max(200) // Ограничение длины адреса
+            .messages({
+                'string.empty': 'Не указан адрес',
+                'string.max': 'Адрес слишком длинный',
+            }),
+        total: Joi.number()
+            .required()
+            .min(0)
+            .messages({
+                'number.base': 'Не указана сумма заказа',
+                'number.min': 'Сумма заказа должна быть положительной',
+            }),
+        comment: Joi.string()
+            .optional()
+            .allow('')
+            .max(500), // Ограничение длины комментария
     }),
 })
 
@@ -64,9 +93,13 @@ export const validateProductBody = celebrate({
         category: Joi.string().required().messages({
             'string.empty': 'Поле "category" должно быть заполнено',
         }),
-        description: Joi.string().required().messages({
-            'string.empty': 'Поле "description" должно быть заполнено',
-        }),
+        description: Joi.string()
+            .required()
+            .max(1000) // Ограничение длины описания
+            .messages({
+                'string.empty': 'Поле "description" должно быть заполнено',
+                'string.max': 'Описание слишком длинное',
+            }),
         price: Joi.number().allow(null),
     }),
 })
@@ -82,7 +115,7 @@ export const validateProductUpdateBody = celebrate({
             originalName: Joi.string().required(),
         }),
         category: Joi.string(),
-        description: Joi.string(),
+        description: Joi.string().max(1000),
         price: Joi.number().allow(null),
     }),
 })
@@ -112,9 +145,11 @@ export const validateUserBody = celebrate({
         email: Joi.string()
             .required()
             .email()
+            .max(100)
             .message('Поле "email" должно быть валидным email-адресом')
             .messages({
                 'string.empty': 'Поле "email" должно быть заполнено',
+                'string.max': 'Email слишком длинный',
             }),
     }),
 })

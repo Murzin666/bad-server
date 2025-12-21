@@ -7,6 +7,16 @@ import Product, { IProduct } from '../models/product'
 import escapeRegExp from '../utils/escapeRegExp'
 import sanitizeHtml from 'sanitize-html'
 
+// Константы для валидации
+const VALIDATION_LIMITS = {
+  MAX_PHONE_LENGTH: 20,
+  MAX_ADDRESS_LENGTH: 200,
+  MAX_EMAIL_LENGTH: 100,
+  MAX_COMMENT_LENGTH: 500,
+  MIN_PHONE_LENGTH: 10,
+  MAX_ITEMS_COUNT: 20
+} as const
+
 // eslint-disable-next-line max-len
 // GET /orders?page=2&limit=5&sort=totalAmount&order=desc&orderDateFrom=2024-07-01&orderDateTo=2024-08-01&status=delivering&totalAmountFrom=100&totalAmountTo=1000&search=%2B1
 
@@ -293,6 +303,128 @@ export const getOrderCurrentUserByNumber = async (
     }
 }
 
+// Вспомогательная функция для безопасной валидации телефона
+const validatePhoneSafely = (phone: string): { isValid: boolean; error?: string } => {
+  // 1. Проверка типа
+  if (typeof phone !== 'string') {
+    return { isValid: false, error: 'Телефон должен быть строкой' }
+  }
+
+  // 2. Проверка длины (БЫСТРАЯ ПРОВЕРКА В НАЧАЛЕ)
+  if (phone.length > VALIDATION_LIMITS.MAX_PHONE_LENGTH) {
+    return { 
+      isValid: false, 
+      error: `Телефон слишком длинный. Максимальная длина: ${VALIDATION_LIMITS.MAX_PHONE_LENGTH} символов` 
+    }
+  }
+
+  if (phone.length < VALIDATION_LIMITS.MIN_PHONE_LENGTH) {
+    return { 
+      isValid: false, 
+      error: `Телефон слишком короткий. Минимальная длина: ${VALIDATION_LIMITS.MIN_PHONE_LENGTH} символов` 
+    }
+  }
+
+  // 3. Проверка на опасные символы (предотвращение инъекций)
+  const dangerousChars = ['$', '{', '}', ';', '|', '&', '`', '"', "'"];
+  for (const char of dangerousChars) {
+    if (phone.includes(char)) {
+      return { 
+        isValid: false, 
+        error: 'Телефон содержит недопустимые символы' 
+      }
+    }
+  }
+
+  // 4. Проверка формата (только после всех быстрых проверок)
+  // Упрощенное регулярное выражение для предотвращения ReDoS
+  const phoneRegex = /^\+?[0-9\s\-\(\)]{10,20}$/;
+  
+  // Безопасная проверка с таймаутом (для Node.js 16+)
+  try {
+    const startTime = Date.now();
+    const isValid = phoneRegex.test(phone);
+    const elapsedTime = Date.now() - startTime;
+    
+    // Если проверка заняла слишком много времени
+    if (elapsedTime > 100) { // 100ms максимум
+      console.warn(`Проверка телефона заняла слишком много времени: ${elapsedTime}ms`);
+      return { 
+        isValid: false, 
+        error: 'Ошибка проверки формата телефона' 
+      }
+    }
+    
+    if (!isValid) {
+      return { 
+        isValid: false, 
+        error: 'Неверный формат телефона. Используйте только цифры, пробелы, дефисы и скобки' 
+      }
+    }
+  } catch (error) {
+    console.error('Ошибка при проверке телефона:', error);
+    return { 
+      isValid: false, 
+      error: 'Ошибка проверки формата телефона' 
+    }
+  }
+
+  return { isValid: true }
+}
+
+// Вспомогательная функция для валидации других полей
+const validateOtherFields = (
+  address: string, 
+  email: string, 
+  comment?: string
+): { isValid: boolean; error?: string } => {
+  
+  // Проверка адреса
+  if (typeof address !== 'string') {
+    return { isValid: false, error: 'Адрес должен быть строкой' }
+  }
+  
+  if (address.length > VALIDATION_LIMITS.MAX_ADDRESS_LENGTH) {
+    return { 
+      isValid: false, 
+      error: `Адрес слишком длинный. Максимальная длина: ${VALIDATION_LIMITS.MAX_ADDRESS_LENGTH} символов` 
+    }
+  }
+
+  if (address.trim().length === 0) {
+    return { isValid: false, error: 'Адрес не может быть пустым' }
+  }
+
+  // Проверка email
+  if (typeof email !== 'string') {
+    return { isValid: false, error: 'Email должен быть строкой' }
+  }
+
+  if (email.length > VALIDATION_LIMITS.MAX_EMAIL_LENGTH) {
+    return { 
+      isValid: false, 
+      error: `Email слишком длинный. Максимальная длина: ${VALIDATION_LIMITS.MAX_EMAIL_LENGTH} символов` 
+    }
+  }
+
+  // Простая проверка формата email (без сложного regex для предотвращения ReDoS)
+  if (!email.includes('@') || email.split('@').length !== 2) {
+    return { isValid: false, error: 'Неверный формат email' }
+  }
+
+  // Проверка комментария (если есть)
+  if (comment && typeof comment === 'string') {
+    if (comment.length > VALIDATION_LIMITS.MAX_COMMENT_LENGTH) {
+      return { 
+        isValid: false, 
+        error: `Комментарий слишком длинный. Максимальная длина: ${VALIDATION_LIMITS.MAX_COMMENT_LENGTH} символов` 
+      }
+    }
+  }
+
+  return { isValid: true }
+}
+
 // POST /product
 export const createOrder = async (
     req: Request,
@@ -300,54 +432,115 @@ export const createOrder = async (
     next: NextFunction
 ) => {
     try {
-        const basket: IProduct[] = []
         const userId = res.locals.user._id
-        const { address, payment, phone, total, email, items, comment } =
-            req.body
+        const { address, payment, phone, total, email, items, comment } = req.body
 
-        if (phone && phone.length > 20) {
+        // 1. Проверка обязательных полей
+        if (!address || !payment || !phone || !total || !email || !items) {
             return res.status(400).json({ 
-                error: 'Телефон слишком длинный. Максимальная длина: 20 символов' 
-            });
+                error: 'Отсутствуют обязательные поля' 
+            })
         }
 
-        if (phone && !/^[\d\s\-\+\(\)]{10,20}$/.test(phone)) {
+        // 2. Проверка типа items
+        if (!Array.isArray(items)) {
             return res.status(400).json({ 
-                error: 'Неверный формат телефона' 
-            });
+                error: 'Поле items должно быть массивом' 
+            })
         }
 
-        const productIds = (items as string[]).map(
-            (id: string) => new Types.ObjectId(id)
-        )
+        // 3. Проверка количества товаров
+        if (items.length === 0) {
+            return res.status(400).json({ 
+                error: 'Корзина не может быть пустой' 
+            })
+        }
 
+        if (items.length > VALIDATION_LIMITS.MAX_ITEMS_COUNT) {
+            return res.status(400).json({ 
+                error: `Слишком много товаров в заказе. Максимум: ${VALIDATION_LIMITS.MAX_ITEMS_COUNT}` 
+            })
+        }
+
+        // 4. Проверка total
+        if (typeof total !== 'number' || total <= 0) {
+            return res.status(400).json({ 
+                error: 'Неверная сумма заказа' 
+            })
+        }
+
+        // 5. Валидация телефона (с защитой от ReDoS)
+        const phoneValidation = validatePhoneSafely(phone)
+        if (!phoneValidation.isValid) {
+            return res.status(400).json({ 
+                error: phoneValidation.error 
+            })
+        }
+
+        // 6. Валидация других полей
+        const fieldsValidation = validateOtherFields(address, email, comment)
+        if (!fieldsValidation.isValid) {
+            return res.status(400).json({ 
+                error: fieldsValidation.error 
+            })
+        }
+
+        // 7. Проверка ID товаров
+        const productIds: Types.ObjectId[] = []
+        for (const id of items) {
+            if (typeof id !== 'string' || !Types.ObjectId.isValid(id)) {
+                return res.status(400).json({ 
+                    error: `Невалидный ID товара: ${id}` 
+                })
+            }
+            productIds.push(new Types.ObjectId(id))
+        }
+
+        // 8. Поиск товаров
         const products = await Product.find<IProduct>({ _id: { $in: productIds } })
         
+        if (products.length !== items.length) {
+            return res.status(400).json({ 
+                error: 'Некоторые товары не найдены' 
+            })
+        }
+
         const productMap = new Map(products.map((p) => [p._id.toString(), p]))
+        let totalBasket = 0
+        const basket: IProduct[] = []
 
         for (const id of items) {
             const product = productMap.get(id)
 
             if (!product) {
-                throw new BadRequestError(`Товар с id ${id} не найден`)
+                return res.status(400).json({ 
+                    error: `Товар с id ${id} не найден` 
+                })
             }
             if (product.price === null) {
-                throw new BadRequestError(`Товар с id ${id} не продается`)
+                return res.status(400).json({ 
+                    error: `Товар с id ${id} не продается` 
+                })
             }
             
             basket.push(product)
+            totalBasket += product.price || 0
         }
 
-        const totalBasket = basket.reduce((a, c) => a + (c.price || 0), 0)
-        if (totalBasket !== total) {
-            return next(new BadRequestError('Неверная сумма заказа'))
+        // 9. Проверка суммы
+        if (Math.abs(totalBasket - total) > 0.01) { // допуск для округления
+            return res.status(400).json({ 
+                error: 'Неверная сумма заказа' 
+            })
         }
 
+        // 10. Очистка комментария
         const safeComment = sanitizeHtml(comment || '', {
             allowedTags: [],
             allowedAttributes: {},
         })
 
+        // 11. Создание заказа
         const newOrder = new Order({
             totalAmount: total,
             products: items,
@@ -364,10 +557,14 @@ export const createOrder = async (
         const populateOrder = await newOrder.populate(['customer', 'products'])
 
         return res.status(200).json(populateOrder)
+        
     } catch (error: unknown) {
         if (error instanceof MongooseError.ValidationError) {
-            return next(new BadRequestError(error.message))
+            return res.status(400).json({ 
+                error: error.message 
+            })
         }
+        console.error('Ошибка при создании заказа:', error)
         return next(error)
     }
 }
