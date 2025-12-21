@@ -15,37 +15,28 @@ export const uploadFile = async (
             return next(new BadRequestError('Файл не загружен или имеет неверный формат'))
         }
         
-        if (req.file.size < 2048) {
-            return next(new BadRequestError('Файл слишком маленький'))
-        }
+        // УБЕРИТЕ проверку размера здесь - она уже в middleware!
+        // if (req.file.size < 2048) {
+        //     return next(new BadRequestError('Файл слишком маленький'))
+        // }
 
         const originalName = req.file.originalname
         const uploadedFileName = req.file.filename
         
-        let finalFileName = uploadedFileName
-        const fileExtension = path.extname(originalName).toLowerCase()
+        // Для отладки
+        console.log('DEBUG UPLOAD:');
+        console.log('  Original name:', originalName);
+        console.log('  Uploaded filename:', uploadedFileName);
+        console.log('  File size:', req.file.size);
+        console.log('  File path:', req.file.path);
         
-        if (originalName === uploadedFileName || 
-            path.basename(uploadedFileName, fileExtension) === path.basename(originalName, fileExtension)) {
-            const timestamp = Date.now()
-            const randomBytes = crypto.randomBytes(8).toString('hex')
-            finalFileName = `${timestamp}-${randomBytes}${fileExtension}`
-            
-            const tempDir = process.env.UPLOAD_PATH_TEMP
-                ? path.join('public', process.env.UPLOAD_PATH_TEMP)
-                : path.join('public', 'uploads', 'temp')
-            
-            const oldPath = path.join(process.cwd(), tempDir, uploadedFileName)
-            const newPath = path.join(process.cwd(), tempDir, finalFileName)
-            
-            if (fs.existsSync(oldPath)) {
-                fs.renameSync(oldPath, newPath)
-            }
-        }
-       
+        // Проверяем, что имя файла безопасное
+        // Просто используем то, что сгенерировал multer
+        // Он уже должен генерировать безопасное имя
+        
         const filePath = process.env.UPLOAD_PATH
-            ? `/${process.env.UPLOAD_PATH}/${finalFileName}`
-            : `/${finalFileName}`
+            ? `/${process.env.UPLOAD_PATH}/${uploadedFileName}`
+            : `/${uploadedFileName}`
             
         return res.status(constants.HTTP_STATUS_CREATED).send({
             fileName: filePath,
