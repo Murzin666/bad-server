@@ -20,7 +20,7 @@ const errorHandler: ErrorRequestHandler = (err: AppError, _req, res, _next) => {
     name: err.name || 'UnknownError'
   })
 
-  res.status(statusCode).send({ message })
+  res.status(statusCode).send({ error: message })
 }
 
 export default errorHandler
