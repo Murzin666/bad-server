@@ -44,7 +44,7 @@ const auth = async (req: Request, res: Response, next: NextFunction) => {
 export function roleGuardMiddleware(...roles: Role[]) {
     return (_req: Request, res: Response, next: NextFunction) => {
         if (!res.locals.user) {
-            return next(new UnauthorizedError('Необходима авторизация'))
+            return res.status(401).json({ error: 'Необходима авторизация' });
         }
 
         const hasAccess = roles.some((role) =>
@@ -52,7 +52,7 @@ export function roleGuardMiddleware(...roles: Role[]) {
         )
 
         if (!hasAccess) {
-            return next(new ForbiddenError('Доступ запрещен'))
+            return res.status(403).json({ error: 'Доступ запрещен' });
         }
 
         return next()
@@ -68,7 +68,7 @@ export function currentUserAccessMiddleware<T>(
         const id = req.params[idProperty]
 
         if (!res.locals.user) {
-            return next(new UnauthorizedError('Необходима авторизация'))
+            return res.status(401).json({ error: 'Необходима авторизация' });
         }
 
         if (res.locals.user.roles.includes(Role.Admin)) {
@@ -87,7 +87,7 @@ export function currentUserAccessMiddleware<T>(
         )
 
         if (!hasAccess) {
-            return next(new ForbiddenError('Доступ запрещен'))
+            return res.status(403).json({ error: 'Доступ запрещен' });
         }
 
         return next()

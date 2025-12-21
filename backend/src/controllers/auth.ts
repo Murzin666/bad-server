@@ -9,6 +9,7 @@ import ConflictError from '../errors/conflict-error'
 import NotFoundError from '../errors/not-found-error'
 import UnauthorizedError from '../errors/unauthorized-error'
 import User from '../models/user'
+import { isMongooseDuplicateKeyError } from '../utils/error-helpers'
 
 // POST /auth/login
 const login = async (req: Request, res: Response, next: NextFunction) => {
@@ -20,14 +21,17 @@ const login = async (req: Request, res: Response, next: NextFunction) => {
         res.cookie(
             REFRESH_TOKEN.cookie.name,
             refreshToken,
-            REFRESH_TOKEN.cookie.options
-        )
+            {
+                ...REFRESH_TOKEN.cookie.options,
+                sameSite: 'strict' as const
+            }
+        )        
         return res.json({
             success: true,
             user,
             accessToken,
         })
-    } catch (err) {
+    } catch (err: unknown) {
         return next(err)
     }
 }
@@ -44,22 +48,25 @@ const register = async (req: Request, res: Response, next: NextFunction) => {
         res.cookie(
             REFRESH_TOKEN.cookie.name,
             refreshToken,
-            REFRESH_TOKEN.cookie.options
-        )
+            {
+                ...REFRESH_TOKEN.cookie.options,
+                sameSite: 'strict' as const
+            }
+        ) 
         return res.status(constants.HTTP_STATUS_CREATED).json({
             success: true,
             user: newUser,
             accessToken,
         })
-    } catch (error) {
+    } catch (error: unknown) {
         if (error instanceof MongooseError.ValidationError) {
             return next(new BadRequestError(error.message))
         }
-        if (error instanceof Error && error.message.includes('E11000')) {
+        if (isMongooseDuplicateKeyError(error)) {
             return next(
                 new ConflictError('Пользователь с таким email уже существует')
             )
-        }
+        }    
         return next(error)
     }
 }
@@ -79,58 +86,50 @@ const getCurrentUser = async (
                 )
         )
         res.json({ user, success: true })
-    } catch (error) {
+    } catch (error: unknown) {
         next(error)
     }
 }
 
-// Можно лучше: вынести общую логику получения данных из refresh токена
-const deleteRefreshTokenInUser = async (
-    req: Request,
-    _res: Response,
-    _next: NextFunction
-) => {
-    const { cookies } = req
-    const rfTkn = cookies[REFRESH_TOKEN.cookie.name]
-
-    if (!rfTkn) {
-        throw new UnauthorizedError('Не валидный токен')
-    }
-
-    const decodedRefreshTkn = jwt.verify(
-        rfTkn,
-        REFRESH_TOKEN.secret
-    ) as JwtPayload
-    const user = await User.findOne({
-        _id: decodedRefreshTkn._id,
-    }).orFail(() => new UnauthorizedError('Пользователь не найден в базе'))
-
-    const rTknHash = crypto
-        .createHmac('sha256', REFRESH_TOKEN.secret)
-        .update(rfTkn)
-        .digest('hex')
-
-    user.tokens = user.tokens.filter((tokenObj) => tokenObj.token !== rTknHash)
-
-    await user.save()
-
-    return user
-}
-
-// Реализация удаления токена из базы может отличаться
 // GET  /auth/logout
 const logout = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        await deleteRefreshTokenInUser(req, res, next)
-        const expireCookieOptions = {
+        const { cookies } = req
+        const rfTkn = cookies[REFRESH_TOKEN.cookie.name]
+
+        if (rfTkn) {
+            try {
+                const decoded = jwt.verify(rfTkn, REFRESH_TOKEN.secret) as JwtPayload
+                
+                const rTknHash = crypto
+                    .createHmac('sha256', REFRESH_TOKEN.secret)
+                    .update(rfTkn)
+                    .digest('hex')
+
+                await User.findByIdAndUpdate(
+                    decoded._id || decoded.sub,
+                    { $pull: { tokens: { token: rTknHash } } },
+                    { new: true }
+                )
+            } catch (jwtError) {
+                console.warn('Invalid JWT during logout:', jwtError)
+            }
+        }
+
+        res.clearCookie(REFRESH_TOKEN.cookie.name, {
             ...REFRESH_TOKEN.cookie.options,
             maxAge: -1,
-        }
-        res.cookie(REFRESH_TOKEN.cookie.name, '', expireCookieOptions)
-        res.status(200).json({
-            success: true,
         })
-    } catch (error) {
+        
+        return res.status(200).json({
+            success: true,
+            message: 'Выход выполнен'
+        })
+    } catch (error: unknown) {
+        res.clearCookie(REFRESH_TOKEN.cookie.name, {
+            ...REFRESH_TOKEN.cookie.options,
+            maxAge: -1,
+        })
         next(error)
     }
 }
@@ -142,45 +141,80 @@ const refreshAccessToken = async (
     next: NextFunction
 ) => {
     try {
-        const userWithRefreshTkn = await deleteRefreshTokenInUser(
-            req,
-            res,
-            next
+        const { cookies } = req
+        const rfTkn = cookies[REFRESH_TOKEN.cookie.name]
+
+        if (!rfTkn) {
+            throw new UnauthorizedError('Refresh токен отсутствует')
+        }
+        const decoded = jwt.verify(rfTkn, REFRESH_TOKEN.secret) as JwtPayload
+        const userId = decoded._id || decoded.sub
+        const user = await User.findById(userId).orFail(
+            () => new UnauthorizedError('Пользователь не найден в базе')
         )
-        const accessToken = await userWithRefreshTkn.generateAccessToken()
-        const refreshToken = await userWithRefreshTkn.generateRefreshToken()
+
+        const rTknHash = crypto
+            .createHmac('sha256', REFRESH_TOKEN.secret)
+            .update(rfTkn)
+            .digest('hex')
+        
+        const tokenExists = user.tokens.some(
+            (tokenObj) => tokenObj.token === rTknHash
+        )
+        
+        if (!tokenExists) {
+            throw new UnauthorizedError('Токен отозван или недействителен')
+        }
+
+        await User.findByIdAndUpdate(
+            userId,
+            { $pull: { tokens: { token: rTknHash } } },
+            { new: true }
+        )
+
+        const accessToken = user.generateAccessToken()
+        const newRefreshToken = await user.generateRefreshToken()
+
         res.cookie(
             REFRESH_TOKEN.cookie.name,
-            refreshToken,
-            REFRESH_TOKEN.cookie.options
+            newRefreshToken,
+            {
+                ...REFRESH_TOKEN.cookie.options,
+                sameSite: 'strict' as const
+            }
         )
         return res.json({
             success: true,
-            user: userWithRefreshTkn,
+            user,
             accessToken,
         })
-    } catch (error) {
-        return next(error)
+    } catch (error: unknown) {
+        res.clearCookie(REFRESH_TOKEN.cookie.name, {
+            ...REFRESH_TOKEN.cookie.options,
+            maxAge: -1,
+        })
+        
+        return next(
+            new UnauthorizedError('Ошибка авторизации, пожалуйста, войдите снова')
+        )
     }
 }
 
 const getCurrentUserRoles = async (
-    req: Request,
+    _req: Request,
     res: Response,
     next: NextFunction
 ) => {
-    const userId = res.locals.user._id
     try {
-        await User.findById(userId, req.body, {
-            new: true,
-        }).orFail(
+        const userId = res.locals.user._id
+        const user = await User.findById(userId).orFail(
             () =>
                 new NotFoundError(
                     'Пользователь по заданному id отсутствует в базе'
                 )
         )
-        res.status(200).json(res.locals.user.roles)
-    } catch (error) {
+        res.status(200).json(user.roles)
+    } catch (error: unknown) {
         next(error)
     }
 }
@@ -190,18 +224,37 @@ const updateCurrentUser = async (
     res: Response,
     next: NextFunction
 ) => {
-    const userId = res.locals.user._id
     try {
-        const updatedUser = await User.findByIdAndUpdate(userId, req.body, {
-            new: true,
-        }).orFail(
+        const userId = res.locals.user._id
+        
+        const { name, email } = req.body
+        const updateData = { name, email }
+        
+        const updatedUser = await User.findByIdAndUpdate(
+            userId, 
+            updateData, 
+            {
+                new: true,
+                runValidators: true
+            }
+        ).orFail(
             () =>
                 new NotFoundError(
                     'Пользователь по заданному id отсутствует в базе'
                 )
         )
         res.status(200).json(updatedUser)
-    } catch (error) {
+    } catch (error: unknown) {
+        if (isMongooseDuplicateKeyError(error)) {
+            return next(
+                new ConflictError('Пользователь с таким email уже существует')
+            )
+        }
+        
+        if (error instanceof MongooseError.ValidationError) {
+            return next(new BadRequestError(error.message))
+        }
+        
         next(error)
     }
 }

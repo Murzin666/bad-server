@@ -1,9 +1,49 @@
-import { Request, Express } from 'express'
-import multer, { FileFilterCallback } from 'multer'
-import { join } from 'path'
+import { Request, Response } from 'express'
+import multer, { FileFilterCallback, MulterError } from 'multer'
+import { join, extname, resolve } from 'path'
+import crypto from 'crypto'
+import fs from 'fs'
 
 type DestinationCallback = (error: Error | null, destination: string) => void
 type FileNameCallback = (error: Error | null, filename: string) => void
+
+const ALLOWED_MIME_TYPES = [
+    'image/png',
+    'image/jpg',
+    'image/jpeg',
+    'image/gif',
+    'image/svg+xml',
+    'image/webp',
+    'image/bmp',
+    'image/tiff'
+] as const
+
+type AllowedMimeType = typeof ALLOWED_MIME_TYPES[number]
+
+const ensureDirectoryExists = (dirPath: string): void => {
+    if (!fs.existsSync(dirPath)) {
+        fs.mkdirSync(dirPath, { recursive: true })
+    }
+}
+
+const generateSafeFilename = (originalName: string): string => {
+    const randomBytes = crypto.randomBytes(16).toString('hex')
+    const timestamp = Date.now()
+    const extension = extname(originalName).toLowerCase()
+    
+    return `${timestamp}-${randomBytes}${extension || '.bin'}`
+}
+
+class FileUploadError extends Error {
+    constructor(
+        message: string,
+        public code?: string,
+        public field?: string
+    ) {
+        super(message)
+        this.name = 'FileUploadError'
+    }
+}
 
 const storage = multer.diskStorage({
     destination: (
@@ -11,15 +51,23 @@ const storage = multer.diskStorage({
         _file: Express.Multer.File,
         cb: DestinationCallback
     ) => {
-        cb(
-            null,
-            join(
-                __dirname,
-                process.env.UPLOAD_PATH_TEMP
-                    ? `../public/${process.env.UPLOAD_PATH_TEMP}`
-                    : '../public'
+        try {
+            const uploadPath = process.env.UPLOAD_PATH_TEMP
+                ? join('public', process.env.UPLOAD_PATH_TEMP)
+                : join('public', 'uploads', 'temp')
+            
+            const absolutePath = resolve(process.cwd(), uploadPath)
+            
+            ensureDirectoryExists(absolutePath)
+            
+            cb(null, absolutePath)
+        } catch (error) {
+            const uploadError = new FileUploadError(
+                'Не удалось создать директорию для загрузки файлов',
+                'DIRECTORY_ERROR'
             )
-        )
+            cb(uploadError, '')
+        }
     },
 
     filename: (
@@ -27,28 +75,234 @@ const storage = multer.diskStorage({
         file: Express.Multer.File,
         cb: FileNameCallback
     ) => {
-        cb(null, file.originalname)
+        try {
+            const safeFilename = generateSafeFilename(file.originalname)
+            cb(null, safeFilename)
+        } catch (error) {
+            const uploadError = new FileUploadError(
+                'Не удалось сгенерировать имя файла',
+                'FILENAME_ERROR'
+            )
+            cb(uploadError, '')
+        }
     },
 })
-
-const types = [
-    'image/png',
-    'image/jpg',
-    'image/jpeg',
-    'image/gif',
-    'image/svg+xml',
-]
 
 const fileFilter = (
     _req: Request,
     file: Express.Multer.File,
     cb: FileFilterCallback
 ) => {
-    if (!types.includes(file.mimetype)) {
-        return cb(null, false)
-    }
+    try {
+        if (!ALLOWED_MIME_TYPES.includes(file.mimetype as AllowedMimeType)) {
+            const error = new FileUploadError(
+                `Недопустимый тип файла. Разрешенные типы: ${ALLOWED_MIME_TYPES.join(', ')}`,
+                'INVALID_FILE_TYPE'
+            )
+            return cb(error)
+        }
 
-    return cb(null, true)
+        const extension = extname(file.originalname).toLowerCase()
+        const suspiciousExtensions = ['.exe', '.bat', '.sh', '.php', '.js', '.html', '.htaccess']
+        
+        if (suspiciousExtensions.includes(extension)) {
+            const error = new FileUploadError(
+                'Файлы с таким расширением не разрешены',
+                'SUSPICIOUS_EXTENSION'
+            )
+            return cb(error)
+        }
+
+        if (!file.originalname || file.originalname.trim().length === 0) {
+            const error = new FileUploadError(
+                'Имя файла не может быть пустым',
+                'EMPTY_FILENAME'
+            )
+            return cb(error)
+        }
+
+        cb(null, true)
+    } catch (error) {
+        const uploadError = new FileUploadError(
+            'Ошибка при проверке файла',
+            'FILTER_ERROR'
+        )
+        cb(uploadError)
+    }
 }
 
-export default multer({ storage, fileFilter })
+export const validateFileMetadata = async (file: Express.Multer.File): Promise<void> => {
+    try {
+        if (file.size < 2048) {
+            throw new FileUploadError('Файл слишком маленький (минимум 2KB)', 'FILE_TOO_SMALL');
+        }
+        
+        if (file.size > 10 * 1024 * 1024) {
+            throw new FileUploadError('Файл слишком большой (максимум 10MB)', 'FILE_TOO_LARGE');
+        }
+        
+        let bufferToCheck: Buffer;
+        
+        if (file.buffer && file.buffer.length > 0) {
+            bufferToCheck = file.buffer;
+        } else if (file.path && fs.existsSync(file.path)) {
+            bufferToCheck = fs.readFileSync(file.path);
+        } else {
+            throw new FileUploadError(
+                'Не удалось прочитать файл для проверки', 
+                'FILE_READ_ERROR'
+            );
+        }
+        
+        if (bufferToCheck.length > 100) {
+            let allZeros = true;
+            
+            for (let i = 0; i < Math.min(100, bufferToCheck.length); i++) {
+                if (bufferToCheck[i] !== 0) {
+                    allZeros = false;
+                    break;
+                }
+            }
+            
+            if (allZeros) {
+                throw new FileUploadError(
+                    'Файл содержит некорректные данные', 
+                    'INVALID_IMAGE_DATA'
+                );
+            }
+        }
+        
+        if (bufferToCheck.length >= 8) {
+            const isPNG = bufferToCheck[0] === 0x89 && 
+                         bufferToCheck[1] === 0x50 && 
+                         bufferToCheck[2] === 0x4E && 
+                         bufferToCheck[3] === 0x47;
+            
+            const isJPEG = bufferToCheck[0] === 0xFF && 
+                          bufferToCheck[1] === 0xD8 && 
+                          bufferToCheck[2] === 0xFF;
+            
+            const isGIF = bufferToCheck.length >= 6 &&
+                bufferToCheck[0] === 0x47 && bufferToCheck[1] === 0x49 && bufferToCheck[2] === 0x46 &&
+                bufferToCheck[3] === 0x38 && (bufferToCheck[4] === 0x37 || bufferToCheck[4] === 0x39);
+            
+            const isWebP = bufferToCheck.length >= 12 &&
+                bufferToCheck[0] === 0x52 && bufferToCheck[1] === 0x49 && 
+                bufferToCheck[2] === 0x46 && bufferToCheck[3] === 0x46 &&
+                bufferToCheck[8] === 0x57 && bufferToCheck[9] === 0x45 &&
+                bufferToCheck[10] === 0x42 && bufferToCheck[11] === 0x50;
+            
+            if (!isPNG && !isJPEG && !isGIF && !isWebP) {
+                throw new FileUploadError(
+                    'Файл не является валидным изображением (PNG, JPEG, GIF, WebP)', 
+                    'NOT_AN_IMAGE'
+                );
+            }
+            
+        } else {
+            throw new FileUploadError(
+                'Файл слишком маленький для изображения', 
+                'FILE_TOO_SMALL_FOR_IMAGE'
+            );
+        }
+        
+    } catch (error) {
+        if (error instanceof FileUploadError) {
+            throw error;
+        }
+        console.error('Validation error:', error);
+        throw new FileUploadError('Ошибка проверки файла', 'VALIDATION_ERROR');
+    }
+};
+
+export const handleMulterError = (err: any, req: any, res: Response, next: any) => {
+    if (err instanceof MulterError) {
+        let message = 'Ошибка загрузки файла'
+        
+        switch (err.code) {
+            case 'LIMIT_FILE_SIZE':
+                message = 'Файл слишком большой. Максимальный размер: 10 МБ'
+                break
+            case 'LIMIT_FILE_COUNT':
+                message = 'Слишком много файлов. Максимальное количество: 1'
+                break
+            case 'LIMIT_UNEXPECTED_FILE':
+                message = 'Недопустимое поле для загрузки файла'
+                break
+        }
+        
+        return res.status(400).json({
+            error: 'UploadError',
+            message,
+            code: err.code,
+            field: err.field
+        })
+    } else if (err instanceof FileUploadError) {
+        return res.status(400).json({
+            error: 'FileUploadError',
+            message: err.message,
+            code: err.code,
+            field: err.field
+        })
+    } else if (err) {
+        console.error('File upload error:', err)
+        return res.status(500).json({
+            error: 'ServerError',
+            message: 'Произошла ошибка при загрузке файла'
+        })
+    }
+    
+    next()
+}
+
+const upload = multer({
+    storage,
+    limits: {
+        fileSize: 10 * 1024 * 1024,
+        files: 1,
+    },
+    fileFilter
+})
+
+export const fileMetadataMiddleware = async (req: Request, res: Response, next: Function) => {
+    try {
+        if (!req.file) {
+            return next();
+        }
+
+        await validateFileMetadata(req.file);
+        next();
+    } catch (error) {
+        if (error instanceof FileUploadError) {
+            return res.status(400).json({
+                error: error.name,
+                message: error.message,
+                code: error.code
+            });
+        }
+        next(error);
+    }
+};
+
+export const uploadSingle = (fieldName: string) => [
+    upload.single(fieldName),
+    fileMetadataMiddleware,
+    handleMulterError
+]
+
+export const uploadArray = (fieldName: string, maxCount?: number) => [
+    upload.array(fieldName, maxCount || 10),
+    handleMulterError
+]
+
+export const uploadFields = (fields: multer.Field[]) => [
+    upload.fields(fields),
+    handleMulterError
+]
+
+export const uploadAny = () => [
+    upload.any(),
+    handleMulterError
+]
+
+export default upload

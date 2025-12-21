@@ -1,8 +1,11 @@
 import { NextFunction, Request, Response } from 'express'
-import { FilterQuery } from 'mongoose'
+import { FilterQuery, SortOrder } from 'mongoose'
 import NotFoundError from '../errors/not-found-error'
 import Order from '../models/order'
 import User, { IUser } from '../models/user'
+import escapeRegExp from '../utils/escapeRegExp'
+
+type CustomerSortFields = 'createdAt' | 'totalAmount' | 'orderCount' | 'lastOrderDate' | 'name' | 'email'
 
 // TODO: Добавить guard admin
 // eslint-disable-next-line max-len
@@ -14,8 +17,8 @@ export const getCustomers = async (
 ) => {
     try {
         const {
-            page = 1,
-            limit = 10,
+            page = '1',
+            limit = '10',
             sortField = 'createdAt',
             sortOrder = 'desc',
             registrationDateFrom,
@@ -27,19 +30,37 @@ export const getCustomers = async (
             orderCountFrom,
             orderCountTo,
             search,
-        } = req.query
+        } = req.query as { [key: string]: string }
+
+        const pageNum = Math.max(1, parseInt(page, 10) || 1)
+
+        const requestedLimit = parseInt(limit, 10) || 10
+        const limitNum = Math.min(Math.max(requestedLimit, 1), 10)
 
         const filters: FilterQuery<Partial<IUser>> = {}
+
+        if (search) {
+            const safeSearchString = escapeRegExp(search.trim())
+
+            if (safeSearchString.length > 100) {
+                return res.status(400).json({ error: 'Слишком длинный поисковый запрос' })
+            }
+
+            filters.$or = [
+                { name: { $regex: safeSearchString, $options: 'i' } },
+                { email: { $regex: safeSearchString, $options: 'i' } }
+            ]
+        }
 
         if (registrationDateFrom) {
             filters.createdAt = {
                 ...filters.createdAt,
-                $gte: new Date(registrationDateFrom as string),
+                $gte: new Date(registrationDateFrom),
             }
         }
 
         if (registrationDateTo) {
-            const endOfDay = new Date(registrationDateTo as string)
+            const endOfDay = new Date(registrationDateTo)
             endOfDay.setHours(23, 59, 59, 999)
             filters.createdAt = {
                 ...filters.createdAt,
@@ -50,12 +71,12 @@ export const getCustomers = async (
         if (lastOrderDateFrom) {
             filters.lastOrderDate = {
                 ...filters.lastOrderDate,
-                $gte: new Date(lastOrderDateFrom as string),
+                $gte: new Date(lastOrderDateFrom),
             }
         }
 
         if (lastOrderDateTo) {
-            const endOfDay = new Date(lastOrderDateTo as string)
+            const endOfDay = new Date(lastOrderDateTo)
             endOfDay.setHours(23, 59, 59, 999)
             filters.lastOrderDate = {
                 ...filters.lastOrderDate,
@@ -92,13 +113,14 @@ export const getCustomers = async (
         }
 
         if (search) {
-            const searchRegex = new RegExp(search as string, 'i')
+            const safeSearchString = escapeRegExp(search)
+            const searchRegex = new RegExp(safeSearchString, 'i')
             const orders = await Order.find(
                 {
-                    $or: [{ deliveryAddress: searchRegex }],
+                    deliveryAddress: searchRegex,
                 },
                 '_id'
-            )
+            ).limit(1000)
 
             const orderIds = orders.map((order) => order._id)
 
@@ -108,47 +130,50 @@ export const getCustomers = async (
             ]
         }
 
-        const sort: { [key: string]: any } = {}
+        const sort: { [key in CustomerSortFields]?: SortOrder } = {}
 
-        if (sortField && sortOrder) {
-            sort[sortField as string] = sortOrder === 'desc' ? -1 : 1
+        const allowedSortFields: CustomerSortFields[] = [
+            'createdAt',
+            'totalAmount',
+            'orderCount',
+            'lastOrderDate',
+            'name',
+            'email',
+        ]
+
+        if (allowedSortFields.includes(sortField as CustomerSortFields)) {
+            sort[sortField as CustomerSortFields] = sortOrder === 'desc' ? -1 : 1
+        } else {
+            sort.createdAt = -1
         }
 
         const options = {
             sort,
-            skip: (Number(page) - 1) * Number(limit),
-            limit: Number(limit),
+            skip: (pageNum - 1) * limitNum,
+            limit: limitNum,
         }
 
         const users = await User.find(filters, null, options).populate([
             'orders',
             {
                 path: 'lastOrder',
-                populate: {
-                    path: 'products',
-                },
-            },
-            {
-                path: 'lastOrder',
-                populate: {
-                    path: 'customer',
-                },
+                populate: ['products', 'customer'],
             },
         ])
 
         const totalUsers = await User.countDocuments(filters)
-        const totalPages = Math.ceil(totalUsers / Number(limit))
+        const totalPages = Math.ceil(totalUsers / limitNum)
 
         res.status(200).json({
             customers: users,
             pagination: {
                 totalUsers,
                 totalPages,
-                currentPage: Number(page),
-                pageSize: Number(limit),
+                currentPage: pageNum,
+                pageSize: limitNum,
             },
         })
-    } catch (error) {
+    } catch (error: unknown) {
         next(error)
     }
 }
@@ -165,8 +190,13 @@ export const getCustomerById = async (
             'orders',
             'lastOrder',
         ])
+        
+        if (!user) {
+            throw new NotFoundError('Пользователь по заданному id отсутствует в базе')
+        }
+        
         res.status(200).json(user)
-    } catch (error) {
+    } catch (error: unknown) {
         next(error)
     }
 }
@@ -179,11 +209,19 @@ export const updateCustomer = async (
     next: NextFunction
 ) => {
     try {
+        const { name, email, phone, roles } = req.body
+        const updateData: Partial<IUser> = {}
+        if (name !== undefined) updateData.name = name
+        if (email !== undefined) updateData.email = email
+        if (phone !== undefined) updateData.phone = phone
+        if (roles !== undefined) updateData.roles = roles
+
         const updatedUser = await User.findByIdAndUpdate(
             req.params.id,
-            req.body,
+            updateData,
             {
                 new: true,
+                runValidators: true,
             }
         )
             .orFail(
@@ -193,8 +231,9 @@ export const updateCustomer = async (
                     )
             )
             .populate(['orders', 'lastOrder'])
+            
         res.status(200).json(updatedUser)
-    } catch (error) {
+    } catch (error: unknown) {
         next(error)
     }
 }
@@ -214,7 +253,7 @@ export const deleteCustomer = async (
                 )
         )
         res.status(200).json(deletedUser)
-    } catch (error) {
+    } catch (error: unknown) {
         next(error)
     }
 }
