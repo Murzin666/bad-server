@@ -10,7 +10,7 @@ import { Role } from '../models/user'
 
 const customerRouter = Router()
 
-customerRouter.use(roleGuardMiddleware(Role.Admin))
+customerRouter.use(auth, roleGuardMiddleware(Role.Admin))
 
 customerRouter.get('/', getCustomers)
 customerRouter.get('/:id', getCustomerById)

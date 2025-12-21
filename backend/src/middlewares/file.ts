@@ -134,70 +134,41 @@ const fileFilter = (
 
 export const validateFileMetadata = async (file: Express.Multer.File): Promise<void> => {
     try {
+        // Проверка размера
         if (file.size < 2048) {
-            throw new FileUploadError(
-                'Файл слишком маленький. Минимальный размер: 2KB',
-                'FILE_TOO_SMALL'
-            );
+            throw new FileUploadError('Файл слишком маленький (минимум 2KB)', 'FILE_TOO_SMALL');
         }
-
-        if (file.size > 10 * 1024 * 1024) {
-            throw new FileUploadError(
-                'Файл слишком большой. Максимальный размер: 10MB',
-                'FILE_TOO_LARGE'
-            );
-        }
-
-        const buffer = file.buffer;
-        const uint8Array = new Uint8Array(
-            buffer.buffer,
-            buffer.byteOffset,
-            buffer.byteLength
-        );
-
-        const type = await fileTypeFromBuffer(uint8Array);
-        if (!type) {
-            throw new FileUploadError(
-                'Не удалось определить тип файла',
-                'UNKNOWN_FILE_TYPE'
-            );
-        }
-
-        const allowedImageTypes = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff'];
-        if (!allowedImageTypes.includes(type.mime)) {
-            throw new FileUploadError(
-                'Файл не является изображением',
-                'NOT_AN_IMAGE'
-            );
-        }
-
-        const fileExt = extname(file.originalname).toLowerCase();
         
-        const mimeToExt: Record<string, string[]> = {
-            'image/png': ['.png'],
-            'image/jpeg': ['.jpg', '.jpeg', '.jpe', '.jfif'],
-            'image/gif': ['.gif'],
-            'image/webp': ['.webp'],
-            'image/bmp': ['.bmp', '.dib'],
-            'image/tiff': ['.tiff', '.tif']
-        };
-
-        const allowedExtensions = mimeToExt[type.mime] || [];
-        if (!allowedExtensions.some(ext => fileExt === ext)) {
-            throw new FileUploadError(
-                `Несоответствие типа файла (${type.mime}) и расширения (${fileExt})`,
-                'MISMATCHED_EXTENSION'
-            );
+        if (file.size > 10 * 1024 * 1024) {
+            throw new FileUploadError('Файл слишком большой (максимум 10MB)', 'FILE_TOO_LARGE');
         }
-
+        
+        // Проверка магических чисел
+        const buffer = file.buffer;
+        
+        // PNG
+        const isPNG = buffer.length >= 8 && 
+            buffer[0] === 0x89 && buffer[1] === 0x50 && 
+            buffer[2] === 0x4E && buffer[3] === 0x47;
+        
+        // JPEG
+        const isJPEG = buffer.length >= 3 && 
+            buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF;
+        
+        // GIF
+        const isGIF = buffer.length >= 6 &&
+            buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 &&
+            buffer[3] === 0x38 && (buffer[4] === 0x37 || buffer[4] === 0x39);
+        
+        if (!isPNG && !isJPEG && !isGIF) {
+            throw new FileUploadError('Файл не является изображением (PNG, JPEG, GIF)', 'NOT_AN_IMAGE');
+        }
+        
     } catch (error) {
         if (error instanceof FileUploadError) {
             throw error;
         }
-        throw new FileUploadError(
-            'Ошибка при проверке метаданных файла',
-            'METADATA_VALIDATION_ERROR'
-        );
+        throw new FileUploadError('Ошибка проверки файла', 'VALIDATION_ERROR');
     }
 };
 

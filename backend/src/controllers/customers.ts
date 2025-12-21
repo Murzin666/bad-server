@@ -35,11 +35,23 @@ export const getCustomers = async (
         const pageNum = Math.max(1, parseInt(page, 10) || 1)
 
         const requestedLimit = parseInt(limit, 10) || 10
-        const limitNum = Math.min(requestedLimit, 10)
+        const limitNum = Math.min(Math.max(requestedLimit, 1), 10)
 
         const filters: FilterQuery<Partial<IUser>> = {}
 
-        // Фильтрация по дате регистрации
+        if (search) {
+            const safeSearchString = escapeRegExp(search.trim())
+
+            if (safeSearchString.length > 100) {
+                return res.status(400).json({ error: 'Слишком длинный поисковый запрос' })
+            }
+
+            filters.$or = [
+                { name: { $regex: safeSearchString, $options: 'i' } },
+                { email: { $regex: safeSearchString, $options: 'i' } }
+            ]
+        }
+
         if (registrationDateFrom) {
             filters.createdAt = {
                 ...filters.createdAt,
